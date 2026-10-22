@@ -15,16 +15,18 @@ except ImportError:
     HAS_SCIPY = False
 
 from litedsp.filter.fir import LiteDSPFIRFilter
+from litedsp.filter.fir_poly import LiteDSPFIRDecimator
 
 from litedsp.filter.design import (
     firwin_lowpass, firwin_bandpass,
     remez, remez_lowpass,
     kaiser_window, kaiserord, firwin_kaiser,
     butterworth_sos, chebyshev1_sos, chebyshev2_sos, biquad_sos_quantize,
-    freq_response, report, sos_freq_response,
+    freq_response, report, sos_freq_response, decimating_lowpass_coefficients,
 )
 
 from test.common import run_stream, column
+from test.models import fir_decimator_model
 
 def response_db(taps, freqs, frac_bits=15):
     taps = np.asarray(taps, dtype=float)/(1 << frac_bits)
@@ -226,6 +228,48 @@ class TestRemezGateware(unittest.TestCase):
         measured = 20*np.log10(rms_in/np.sqrt(np.mean(y**2)))
         self.assertLess(abs(measured - rep["stopband_atten_db"]), 3.0,
             f"simulated stopband {measured:.1f} dB vs reported {rep['stopband_atten_db']:.1f} dB")
+
+class TestDecimatingLowpass(unittest.TestCase):
+    # M2SDR 960/480 ksps channels: CIC /16 or /32 from 61.44 MSps, then this FIR decimating by 4.
+    COEFFS, ATTEN = decimating_lowpass_coefficients(4, usable=0.70, atten_db=82.0, coeff_width=18)
+
+    def test_design(self):
+        self.assertEqual(len(self.COEFFS), 53)
+        self.assertGreaterEqual(self.ATTEN, 82.0)
+        self.assertAlmostEqual(sum(self.COEFFS)/(1 << 17), 1.0, places=3)
+
+    def test_alias_rejection_after_cic(self):
+        # Everything folding onto the kept 70 % band, CIC (N = 4) included, stays >= 80 dB
+        # below the weakest kept frequency.
+        fs, h = 61.44e6, np.asarray(self.COEFFS, dtype=float)/(1 << 17)
+        for R in (16, 32):
+            fo  = fs/R/4
+            fs1 = fs/R
+            def gain(f):
+                x   = np.pi*np.asarray(f)/fs
+                cic = np.ones_like(x)
+                nz  = x != 0
+                cic[nz] = np.abs(np.sin(R*x[nz])/(R*np.sin(x[nz])))**4
+                fir = np.abs(np.exp(-2j*np.pi*np.outer(np.asarray(f)/fs1, np.arange(len(h)))) @ h)
+                return fir*cic
+            band  = np.linspace(0, 0.35*fo, 200)
+            keep  = gain(band).min()
+            images = [f[(f > 0) & (f < fs/2)] for k in range(1, int(fs/2/fo) + 1) for f in (k*fo + band, k*fo - band)]
+            alias  = max(gain(f).max() for f in images if len(f))
+            with self.subTest(cic=R):
+                self.assertGreaterEqual(20*np.log10(keep/alias), 80.0)
+
+    def test_bit_exact_18bit_fir_decimator(self):
+        rng = np.random.RandomState(4)
+        x_i = rng.randint(-32768, 32768, 200)
+        x_q = rng.randint(-32768, 32768, 200)
+        dut = LiteDSPFIRDecimator(n_taps=len(self.COEFFS), decimation=4, data_width=18,
+            coefficients=self.COEFFS, with_csr=False, architecture="pipelined")
+        cap = run_stream(dut, [{"i": int(i), "q": int(q)} for i, q in zip(x_i, x_q)], 45, ["i", "q"], ["i", "q"],
+            sink_throttle=0.3, source_ready_rate=0.6)
+        for rail, x in (("i", x_i), ("q", x_q)):
+            np.testing.assert_array_equal(column(cap, rail, 18),
+                fir_decimator_model(x, self.COEFFS, 4, data_width=18, shift=17)[:45])
 
 if __name__ == "__main__":
     unittest.main()

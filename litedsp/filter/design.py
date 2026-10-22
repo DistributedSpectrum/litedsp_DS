@@ -309,6 +309,27 @@ def remez_lowpass(n_taps, f_pass, f_stop, data_width=None):
         return h
     return quantize(h, data_width - 1, data_width)
 
+def decimating_lowpass_coefficients(decimation, usable=0.70, atten_db=82.0, coeff_width=18,
+    stop_weight=30.0, max_taps=255):
+    """Shortest odd-length equiripple low-pass for a decimate-by-``decimation`` FIR.
+
+    Keeps ``usable`` of the OUTPUT rate (two-sided) and rejects, by at least ``atten_db`` after
+    quantization to ``coeff_width``-bit Q1.(cw-1) integers with unity DC gain, everything that
+    folds onto it: passband edge ``usable/(2R)``, stopband from ``(1 - usable/2)/R`` (input-rate
+    normalized). Returns ``(coefficients, achieved_db)``. For R = 4, 70 %, 82 dB, 18-bit: 53
+    taps (the M2SDR 960/480 ksps channel filter after a CIC; 16-bit coefficients stop near 75 dB).
+    """
+    R = decimation
+    check(R >= 2 and 0 < usable < 1, "expected decimation >= 2 and 0 < usable < 1")
+    f_pass, f_stop = usable/(2*R), (1 - usable/2)/R
+    for n_taps in range(15, max_taps + 1, 2):
+        h = remez(n_taps, [0, f_pass, f_stop, 0.5], [1.0, 0.0], weights=[1.0, stop_weight])
+        q = quantize(h/h.sum(), coeff_width - 1, coeff_width)
+        achieved = report(q, f_pass, f_stop, data_width=coeff_width)["stopband_atten_db"]
+        if achieved >= atten_db:
+            return q, achieved
+    raise ValueError("no low-pass up to max_taps meets the specification")
+
 # Decomposition ------------------------------------------------------------------------------------
 
 def polyphase_split(taps, n_phases):
