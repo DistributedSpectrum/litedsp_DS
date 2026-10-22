@@ -11,8 +11,9 @@ table (A=12: 1024 x 18-bit = one RAMB18; its two ports read cos and sin together
 give the signed offset d from the table point, and a first-order correction
     sin(t + d) ~= sin t + d*cos t        cos(t + d) ~= cos t - d*sin t
 removes the phase-truncation error (worst spur about -111 dBc for A=12, D=10, 18-bit; versus about
--58 dBc for a plain 1024-entry table). The two small correction products (d is under 10 bits) are
-built in LUTs, not DSP48s. The NCO is fully pipelined and advances once per accepted sample.
+-58 dBc for a plain 1024-entry table). Scaling d to radians is built in LUTs; the two correction
+products use DSP48s (two at F=1, one shared at F>=2). The NCO is fully pipelined and advances once
+per accepted sample.
 
 Mixer: output = input * conj(NCO), four real products per sample time-shared on 4/F DSP48s
 (F = 1, 2, 4), 16-bit sample x 18-bit NCO, round half-up by B-1 bits, saturate to 16 bits.
